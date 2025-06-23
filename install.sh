@@ -2,7 +2,7 @@
 
 # =====================================================
 # HAWLS Panel - Script de Instalação Automática
-# Inspirado no EasyPanel
+# Instalação completa para VPS limpa
 # =====================================================
 
 set -e
@@ -50,6 +50,7 @@ show_banner() {
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "Este script deve ser executado como root"
+        log_info "Execute: sudo su - && curl -sSL https://raw.githubusercontent.com/wrcsilva/hawls-panel-mvp/master/install.sh | bash -s -- \"$TOKEN\" \"$TEMPLATE\""
         exit 1
     fi
 }
@@ -58,7 +59,7 @@ check_root() {
 check_token() {
     if [[ -z "$TOKEN" ]]; then
         log_error "Token de instalação não fornecido"
-        log_info "Uso: curl -sSL https://hawls.com.br/install.sh | bash -s -- TOKEN TEMPLATE"
+        log_info "Uso: curl -sSL https://raw.githubusercontent.com/wrcsilva/hawls-panel-mvp/master/install.sh | bash -s -- TOKEN TEMPLATE"
         exit 1
     fi
     
@@ -85,6 +86,34 @@ check_os() {
     fi
 }
 
+# Instalar dependências básicas
+install_dependencies() {
+    log_info "Instalando dependências básicas..."
+    
+    # Atualizar lista de pacotes
+    apt update -y
+    
+    # Instalar ferramentas essenciais
+    apt install -y \
+        curl \
+        wget \
+        git \
+        dos2unix \
+        unzip \
+        software-properties-common \
+        apt-transport-https \
+        ca-certificates \
+        gnupg \
+        lsb-release \
+        build-essential \
+        ufw \
+        htop \
+        nano \
+        vim
+    
+    log_success "Dependências básicas instaladas"
+}
+
 # Atualizar sistema
 update_system() {
     log_info "Atualizando sistema..."
@@ -105,13 +134,6 @@ install_docker() {
     # Remover versões antigas
     apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
     
-    # Instalar dependências
-    apt install -y \
-        ca-certificates \
-        curl \
-        gnupg \
-        lsb-release
-    
     # Adicionar chave GPG oficial do Docker
     mkdir -p /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -128,6 +150,12 @@ install_docker() {
     # Iniciar e habilitar Docker
     systemctl start docker
     systemctl enable docker
+    
+    # Adicionar usuário ao grupo docker (se não for root)
+    if [[ $EUID -ne 0 ]] && [[ -n "$SUDO_USER" ]]; then
+        usermod -aG docker $SUDO_USER
+        log_info "Usuário $SUDO_USER adicionado ao grupo docker"
+    fi
     
     log_success "Docker instalado com sucesso"
 }
@@ -157,11 +185,6 @@ install_docker_compose() {
 setup_firewall() {
     log_info "Configurando firewall..."
     
-    # Instalar UFW se não estiver instalado
-    if ! command -v ufw &> /dev/null; then
-        apt install -y ufw
-    fi
-    
     # Configurações básicas
     ufw --force reset
     ufw default deny incoming
@@ -181,6 +204,20 @@ setup_firewall() {
     ufw allow 7946/tcp
     ufw allow 7946/udp
     ufw allow 4789/udp
+    
+    # Permitir portas específicas dos templates
+    case $TEMPLATE in
+        "evolution-api")
+            ufw allow 8080/tcp
+            ;;
+        "n8n")
+            ufw allow 5678/tcp
+            ;;
+        "typebot")
+            ufw allow 3000/tcp
+            ufw allow 3001/tcp
+            ;;
+    esac
     
     # Habilitar firewall
     ufw --force enable
@@ -244,7 +281,18 @@ networks:
 EOF
     
     docker-compose up -d
-    log_success "Evolution API instalado na porta 8080"
+    
+    # Aguardar inicialização
+    log_info "Aguardando inicialização do Evolution API..."
+    sleep 30
+    
+    # Verificar se está rodando
+    if curl -s http://localhost:8080 > /dev/null; then
+        log_success "Evolution API instalado com sucesso na porta 8080"
+        log_info "Acesso: http://$(curl -s ifconfig.me):8080"
+    else
+        log_warning "Evolution API pode estar ainda inicializando"
+    fi
 }
 
 # Instalar N8N
@@ -281,7 +329,19 @@ networks:
 EOF
     
     docker-compose up -d
-    log_success "N8N instalado na porta 5678"
+    
+    # Aguardar inicialização
+    log_info "Aguardando inicialização do N8N..."
+    sleep 45
+    
+    # Verificar se está rodando
+    if curl -s http://localhost:5678 > /dev/null; then
+        log_success "N8N instalado com sucesso na porta 5678"
+        log_info "Acesso: http://$(curl -s ifconfig.me):5678"
+        log_info "Usuário: admin | Senha: hawls-n8n-password"
+    else
+        log_warning "N8N pode estar ainda inicializando"
+    fi
 }
 
 # Instalar Typebot
@@ -317,7 +377,18 @@ networks:
 EOF
     
     docker-compose up -d
-    log_success "Typebot instalado na porta 3000"
+    
+    # Aguardar inicialização
+    log_info "Aguardando inicialização do Typebot..."
+    sleep 60
+    
+    # Verificar se está rodando
+    if curl -s http://localhost:3000 > /dev/null; then
+        log_success "Typebot instalado com sucesso na porta 3000"
+        log_info "Acesso: http://$(curl -s ifconfig.me):3000"
+    else
+        log_warning "Typebot pode estar ainda inicializando"
+    fi
 }
 
 # Instalar stack básico
@@ -371,16 +442,18 @@ EOF
     
     # Criar página inicial
     mkdir -p html
-    cat > html/index.html << 'EOF'
+    cat > html/index.html << EOF
 <!DOCTYPE html>
 <html>
 <head>
     <title>HAWLS Panel - Servidor Configurado</title>
     <style>
-        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-        .container { max-width: 600px; margin: 0 auto; }
+        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f0f2f5; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         .logo { font-size: 48px; color: #2563eb; margin-bottom: 20px; }
-        .status { color: #16a34a; font-weight: bold; }
+        .status { color: #16a34a; font-weight: bold; font-size: 18px; }
+        .info { background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; }
+        .token { font-family: monospace; background: #e9ecef; padding: 5px; border-radius: 3px; }
     </style>
 </head>
 <body>
@@ -388,63 +461,41 @@ EOF
         <div class="logo">🚀 HAWLS Panel</div>
         <h1>Servidor Configurado com Sucesso!</h1>
         <p class="status">✅ Instalação concluída</p>
-        <p>Seu servidor está pronto para uso.</p>
+        <div class="info">
+            <p><strong>Token:</strong> <span class="token">$TOKEN</span></p>
+            <p><strong>Template:</strong> $TEMPLATE</p>
+            <p><strong>IP:</strong> $(curl -s ifconfig.me 2>/dev/null || echo "Verificar manualmente")</p>
+        </div>
+        <p>Seu servidor está pronto para uso!</p>
         <hr>
-        <p><small>Instalado via HAWLS Panel - Inspirado no EasyPanel</small></p>
+        <p><small>Instalado via HAWLS Panel - Sistema de instalação automática</small></p>
     </div>
 </body>
 </html>
 EOF
     
     docker-compose up -d
+    
     log_success "Stack básico instalado na porta 80"
+    log_info "Acesso: http://$(curl -s ifconfig.me)"
 }
 
-# Notificar servidor HAWLS
-notify_hawls() {
-    log_info "Notificando servidor HAWLS..."
-    
-    # Obter IP público
-    PUBLIC_IP=$(curl -s ifconfig.me || curl -s ipinfo.io/ip || echo "unknown")
-    
-    # Notificar conclusão (em desenvolvimento)
-    # curl -X POST "$HAWLS_API_URL/api/install/complete" \
-    #     -H "Content-Type: application/json" \
-    #     -d "{\"token\":\"$TOKEN\",\"template\":\"$TEMPLATE\",\"ip\":\"$PUBLIC_IP\",\"status\":\"success\"}" \
-    #     || log_warning "Falha ao notificar servidor HAWLS"
-    
-    log_info "IP público: $PUBLIC_IP"
-}
-
-# Mostrar resumo final
-show_summary() {
+# Finalizar instalação
+finish_installation() {
+    log_success "Instalação concluída com sucesso!"
     echo ""
-    log_success "╔══════════════════════════════════════╗"
-    log_success "║        INSTALAÇÃO CONCLUÍDA!         ║"
-    log_success "╚══════════════════════════════════════╝"
+    echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║            INSTALAÇÃO CONCLUÍDA      ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════╝${NC}"
     echo ""
     log_info "Template instalado: $TEMPLATE"
-    log_info "Token usado: $TOKEN"
-    
-    case $TEMPLATE in
-        "evolution-api")
-            log_info "Evolution API: http://$(curl -s ifconfig.me):8080"
-            ;;
-        "n8n")
-            log_info "N8N: http://$(curl -s ifconfig.me):5678"
-            log_info "Usuário: admin | Senha: hawls-n8n-password"
-            ;;
-        "typebot")
-            log_info "Typebot: http://$(curl -s ifconfig.me):3000"
-            ;;
-        *)
-            log_info "Servidor: http://$(curl -s ifconfig.me)"
-            ;;
-    esac
-    
+    log_info "Token utilizado: $TOKEN"
+    log_info "IP do servidor: $(curl -s ifconfig.me 2>/dev/null || echo "Verificar manualmente")"
     echo ""
     log_info "Para gerenciar os containers:"
-    log_info "cd /opt/hawls/$TEMPLATE && docker-compose logs -f"
+    log_info "  docker ps                    # Listar containers"
+    log_info "  docker-compose logs -f       # Ver logs"
+    log_info "  docker-compose restart       # Reiniciar"
     echo ""
 }
 
@@ -454,18 +505,13 @@ main() {
     check_root
     check_token
     check_os
-    
-    log_info "Iniciando instalação..."
-    
+    install_dependencies
     update_system
     install_docker
     install_docker_compose
     setup_firewall
     install_template
-    notify_hawls
-    show_summary
-    
-    log_success "Instalação concluída com sucesso! 🚀"
+    finish_installation
 }
 
 # Executar função principal
